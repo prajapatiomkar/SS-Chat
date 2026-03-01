@@ -13,12 +13,12 @@
   "license": "ISC",
   "packageManager": "pnpm@10.30.3",
   "dependencies": {
-    "@socket.io/cluster-adapter": "^0.3.0",
+    "@socket.io/redis-adapter": "^8.3.0",
     "@sqlite.org/sqlite-wasm": "3.51.2-build6",
     "express": "^4.22.1",
-    "socket.io": "^4.8.3",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.0.2"
+    "pg": "^8.19.0",
+    "redis": "^5.11.0",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

@@ -3,114 +3,104 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Server } from "socket.io";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
-import { availableParallelism } from "node:os";
-import cluster from "node:cluster";
-import { createAdapter, setupPrimary } from "@socket.io/cluster-adapter";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { createClient } from "redis";
+import pg from "pg";
+import os from "node:os";
 
-// ================= PRIMARY PROCESS =================
-if (cluster.isPrimary) {
-  const numCPUs = availableParallelism();
+const PORT = process.env.PORT || 3000;
 
-  console.log(`Primary ${process.pid} is running`);
-  console.log(`Starting ${numCPUs} workers...\n`);
+const app = express();
+const server = createServer(app);
 
-  setupPrimary();
+// SETUP REDIS ADAPTER FOR MULTI-SERVER PUB/SUB
+const pubClient = createClient({
+  url: process.env.REDIS_URL || "redis://localhost:6379",
+});
+const subClient = pubClient.duplicate();
 
-  for (let i = 0; i < numCPUs; i++) {
-    cluster.fork({
-      PORT: 3000 + i,
-    });
-  }
+await Promise.all([pubClient.connect(), subClient.connect()]);
 
-  cluster.on("exit", (worker) => {
-    console.log(`Worker ${worker.process.pid} died. Restarting...`);
-    cluster.fork();
-  });
-} else {
-  // ================= WORKER PROCESS =================
-  const PORT = process.env.PORT || 3000;
+const io = new Server(server, {
+  connectionStateRecovery: {},
+  adapter: createAdapter(pubClient, subClient),
+});
 
-  const app = express();
-  const server = createServer(app);
+// SETUP POSTGRESQL FOR CENTRALIZED DATABASE
+const { Pool } = pg;
+const db = new Pool({
+  connectionString:
+    process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/chat",
+});
 
-  const io = new Server(server, {
-    connectionStateRecovery: {},
-    adapter: createAdapter(),
-  });
+await db.query(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    client_offset TEXT UNIQUE,
+    content TEXT
+  );
+`);
 
-  // --- DB INIT (ONLY IN WORKER) ---
-  const db = await open({
-    filename: "chat.db",
-    driver: sqlite3.Database,
-  });
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      client_offset TEXT UNIQUE,
-      content TEXT
-    );
-  `);
+app.get("/", (req, res) => {
+  res.sendFile(join(__dirname, "index.html"));
+});
 
-  const __dirname = dirname(fileURLToPath(import.meta.url));
+// ================= SOCKET LOGIC =================
+io.on("connection", async (socket) => {
+  const serverId = `${os.hostname()} (PID: ${process.pid})`;
+  console.log(`[${serverId}]: User ${socket.id} connected`);
 
-  app.get("/", (req, res) => {
-    res.sendFile(join(__dirname, "index.html"));
-  });
+  // Let the client know which server they connected to
+  socket.emit("server info", serverId);
 
-  // ================= SOCKET LOGIC =================
-  io.on("connection", async (socket) => {
-    console.log(`Worker ${process.pid}: User connected`);
+  // --- RECEIVE MESSAGE ---
+  socket.on("chat message", async (msg, clientOffset, callback) => {
+    try {
+      const result = await db.query(
+        "INSERT INTO messages (content, client_offset) VALUES ($1, $2) RETURNING id",
+        [msg, clientOffset],
+      );
 
-    // --- RECEIVE MESSAGE ---
-    socket.on("chat message", async (msg, clientOffset, callback) => {
-      try {
-        const result = await db.run(
-          "INSERT INTO messages (content, client_offset) VALUES (?, ?)",
-          msg,
-          clientOffset,
-        );
+      // Emit message with server offset (id) and the server that processed it
+      io.emit("chat message", msg, result.rows[0].id, serverId);
 
-        // Emit message with server offset (id)
-        io.emit("chat message", msg, result.lastID);
-
-        callback({ status: "ok" });
-      } catch (error) {
-        // SQLITE_CONSTRAINT (duplicate client_offset)
-        if (error?.errno === 19) {
-          callback({ status: "duplicate" });
-        } else {
-          console.error("DB Error:", error);
-          callback({ status: "error" });
-        }
-      }
-    });
-
-    // --- RECOVERY LOGIC ---
-    if (!socket.recovered) {
-      try {
-        const serverOffset = socket.handshake.auth?.serverOffset || 0;
-
-        await db.each(
-          "SELECT id, content FROM messages WHERE id > ?",
-          [serverOffset],
-          (_err, row) => {
-            socket.emit("chat message", row.content, row.id);
-          },
-        );
-      } catch (err) {
-        console.error("Recovery error:", err);
+      callback({ status: "ok" });
+    } catch (error) {
+      // POSTGRES UNIQUE VIOLATION ERROR CODE (duplicate client_offset)
+      if (error?.code === "23505") {
+        callback({ status: "duplicate" });
+      } else {
+        console.error("DB Error:", error);
+        callback({ status: "error" });
       }
     }
-
-    socket.on("disconnect", () => {
-      console.log(`Worker ${process.pid}: User disconnected`);
-    });
   });
 
-  server.listen(PORT, () => {
-    console.log(`Worker ${process.pid} running at http://localhost:${PORT}`);
+  // --- RECOVERY LOGIC ---
+  if (!socket.recovered) {
+    try {
+      const serverOffset = socket.handshake.auth?.serverOffset || 0;
+
+      const result = await db.query(
+        "SELECT id, content FROM messages WHERE id > $1 ORDER BY id ASC",
+        [serverOffset],
+      );
+
+      for (const row of result.rows) {
+        socket.emit("chat message", row.content, row.id, serverId);
+      }
+    } catch (err) {
+      console.error("Recovery error:", err);
+    }
+  }
+
+  socket.on("disconnect", () => {
+    console.log(`[${serverId}]: User ${socket.id} disconnected`);
   });
-}
+});
+
+server.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT} on ${os.hostname()} (PID: ${process.pid})`);
+});
