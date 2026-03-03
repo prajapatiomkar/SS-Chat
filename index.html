@@ -66,6 +66,12 @@
 
 <body>
   <ul id="messages"></ul>
+  <div id="room-selection"
+    style="position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 1000; display: flex; align-items: center; gap: 5px;">
+    <label for="room-input">Room:</label>
+    <input id="room-input" value="general" style="width: 80px; padding: 2px;" autocomplete="off" />
+    <button id="join-room-btn" style="padding: 2px 5px; cursor: pointer;">Join</button>
+  </div>
   <div id="server-info"
     style="position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 5px; font-size: 12px; z-index: 1000;">
     Connecting...
@@ -78,10 +84,12 @@
 <script src="/socket.io/socket.io.js"></script>
 <script>
   let counter = 0;
+  let currentRoom = "general";
 
   const socket = io({
     auth: {
       serverOffset: 0,
+      room: currentRoom,
     },
     ackTimeout: 10000,
     retries: 3,
@@ -93,6 +101,22 @@
   const messages = document.getElementById("messages");
   const toggleButton = document.getElementById("toggle-btn");
   const serverInfo = document.getElementById("server-info");
+
+  const roomInput = document.getElementById("room-input");
+  const joinRoomBtn = document.getElementById("join-room-btn");
+
+  joinRoomBtn.addEventListener("click", () => {
+    const newRoom = roomInput.value.trim() || "general";
+    if (newRoom !== currentRoom) {
+      currentRoom = newRoom;
+      socket.disconnect();
+      socket.auth.room = currentRoom;
+      socket.auth.serverOffset = 0;
+      messages.innerHTML = "";
+      counter = 0;
+      socket.connect();
+    }
+  });
 
   socket.on("server info", (serverId) => {
     serverInfo.innerText = `Connected to: ${serverId}`;

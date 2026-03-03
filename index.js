@@ -37,9 +37,14 @@ await db.query(`
   CREATE TABLE IF NOT EXISTS messages (
     id SERIAL PRIMARY KEY,
     client_offset TEXT UNIQUE,
-    content TEXT
+    content TEXT,
+    room_name TEXT DEFAULT 'general'
   );
 `);
+
+try {
+  await db.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'general';");
+} catch (e) { }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +55,10 @@ app.get("/", (req, res) => {
 // ================= SOCKET LOGIC =================
 io.on("connection", async (socket) => {
   const serverId = `${os.hostname()} (PID: ${process.pid})`;
-  console.log(`[${serverId}]: User ${socket.id} connected`);
+  const room = socket.handshake.auth?.room || "general";
+
+  socket.join(room);
+  console.log(`[${serverId}]: User ${socket.id} connected to room ${room}`);
 
   // Let the client know which server they connected to
   socket.emit("server info", serverId);
@@ -59,12 +67,12 @@ io.on("connection", async (socket) => {
   socket.on("chat message", async (msg, clientOffset, callback) => {
     try {
       const result = await db.query(
-        "INSERT INTO messages (content, client_offset) VALUES ($1, $2) RETURNING id",
-        [msg, clientOffset],
+        "INSERT INTO messages (content, client_offset, room_name) VALUES ($1, $2, $3) RETURNING id",
+        [msg, clientOffset, room],
       );
 
-      // Emit message with server offset (id) and the server that processed it
-      io.emit("chat message", msg, result.rows[0].id, serverId);
+      // Emit message to everyone in the room
+      io.to(room).emit("chat message", msg, result.rows[0].id, serverId);
 
       callback({ status: "ok" });
     } catch (error) {
@@ -84,8 +92,8 @@ io.on("connection", async (socket) => {
       const serverOffset = socket.handshake.auth?.serverOffset || 0;
 
       const result = await db.query(
-        "SELECT id, content FROM messages WHERE id > $1 ORDER BY id ASC",
-        [serverOffset],
+        "SELECT id, content FROM messages WHERE id > $1 AND room_name = $2 ORDER BY id ASC",
+        [serverOffset, room],
       );
 
       for (const row of result.rows) {
