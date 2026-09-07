@@ -38,12 +38,17 @@ await db.query(`
     id SERIAL PRIMARY KEY,
     client_offset TEXT UNIQUE,
     content TEXT,
-    room_name TEXT DEFAULT 'general'
+    room_name TEXT DEFAULT 'general',
+    username TEXT DEFAULT 'Anonymous'
   );
 `);
 
 try {
   await db.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_name TEXT DEFAULT 'general';");
+} catch (e) { }
+
+try {
+  await db.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS username TEXT DEFAULT 'Anonymous';");
 } catch (e) { }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -56,32 +61,45 @@ app.get("/", (req, res) => {
 io.on("connection", async (socket) => {
   const serverId = `${os.hostname()} (PID: ${process.pid})`;
   const room = socket.handshake.auth?.room || "general";
+  const authUsername = socket.handshake.auth?.username || "Anonymous";
 
   socket.join(room);
-  console.log(`[${serverId}]: User ${socket.id} connected to room ${room}`);
+  console.log(`[${serverId}]: User ${authUsername} (${socket.id}) connected to room ${room}`);
 
   // Let the client know which server they connected to
   socket.emit("server info", serverId);
 
   // --- RECEIVE MESSAGE ---
-  socket.on("chat message", async (msg, clientOffset, callback) => {
+  socket.on("chat message", async (...args) => {
+    const msg = args[0];
+    const clientOffset = args[1];
+    let username = authUsername;
+    let callback = null;
+
+    if (typeof args[2] === "string") {
+      if (args[2].trim()) username = args[2].trim();
+      if (typeof args[3] === "function") callback = args[3];
+    } else if (typeof args[2] === "function") {
+      callback = args[2];
+    }
+
     try {
       const result = await db.query(
-        "INSERT INTO messages (content, client_offset, room_name) VALUES ($1, $2, $3) RETURNING id",
-        [msg, clientOffset, room],
+        "INSERT INTO messages (content, client_offset, room_name, username) VALUES ($1, $2, $3, $4) RETURNING id",
+        [msg, clientOffset, room, username],
       );
 
-      // Emit message to everyone in the room
-      io.to(room).emit("chat message", msg, result.rows[0].id, serverId);
+      // Emit message to everyone in the room including username
+      io.to(room).emit("chat message", msg, result.rows[0].id, serverId, username);
 
-      callback({ status: "ok" });
+      if (typeof callback === "function") callback({ status: "ok" });
     } catch (error) {
       // POSTGRES UNIQUE VIOLATION ERROR CODE (duplicate client_offset)
       if (error?.code === "23505") {
-        callback({ status: "duplicate" });
+        if (typeof callback === "function") callback({ status: "duplicate" });
       } else {
         console.error("DB Error:", error);
-        callback({ status: "error" });
+        if (typeof callback === "function") callback({ status: "error" });
       }
     }
   });
@@ -92,12 +110,12 @@ io.on("connection", async (socket) => {
       const serverOffset = socket.handshake.auth?.serverOffset || 0;
 
       const result = await db.query(
-        "SELECT id, content FROM messages WHERE id > $1 AND room_name = $2 ORDER BY id ASC",
+        "SELECT id, content, username FROM messages WHERE id > $1 AND room_name = $2 ORDER BY id ASC",
         [serverOffset, room],
       );
 
       for (const row of result.rows) {
-        socket.emit("chat message", row.content, row.id, serverId);
+        socket.emit("chat message", row.content, row.id, serverId, row.username || "Anonymous");
       }
     } catch (err) {
       console.error("Recovery error:", err);
@@ -105,7 +123,7 @@ io.on("connection", async (socket) => {
   }
 
   socket.on("disconnect", () => {
-    console.log(`[${serverId}]: User ${socket.id} disconnected`);
+    console.log(`[${serverId}]: User ${authUsername} (${socket.id}) disconnected`);
   });
 });
 
