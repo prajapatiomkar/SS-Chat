@@ -341,12 +341,19 @@
         transports: ["websocket"],
       });
 
+      socket.on("connect", () => {
+        toggleButton.innerText = "Disconnect";
+        input.disabled = false;
+        sendBtn.disabled = false;
+      });
+
       socket.on("server info", (serverId) => {
         serverInfo.innerText = `Connected to: ${serverId}`;
       });
 
       socket.on("disconnect", () => {
         serverInfo.innerText = "Disconnected";
+        toggleButton.innerText = "Connect";
       });
 
       socket.on("chat message", (msg, serverOffset, serverId, msgUsername) => {
@@ -375,6 +382,7 @@
 
       input.disabled = false;
       sendBtn.disabled = false;
+      toggleButton.innerText = "Disconnect";
       input.focus();
 
       initSocket();
@@ -417,11 +425,32 @@
     toggleButton.addEventListener("click", (e) => {
       e.preventDefault();
       if (socket && socket.connected) {
-        toggleButton.innerText = "Connect";
+        // Disconnect socket
         socket.disconnect();
-      } else if (socket) {
-        toggleButton.innerText = "Disconnect";
-        socket.connect();
+
+        // Clear stored username & info
+        username = "";
+        localStorage.removeItem("ss_chat_username");
+        userNameDisplay.innerText = "Anonymous";
+        usernameInput.value = "";
+
+        // Disable input until name is entered
+        input.disabled = true;
+        sendBtn.disabled = true;
+        toggleButton.innerText = "Connect";
+
+        // Show enter name modal prompt
+        usernameModal.classList.remove("hidden");
+        setTimeout(() => usernameInput.focus(), 100);
+      } else {
+        // If user clicks connect, prompt for username if empty
+        if (!username) {
+          usernameModal.classList.remove("hidden");
+          setTimeout(() => usernameInput.focus(), 100);
+        } else if (socket) {
+          toggleButton.innerText = "Disconnect";
+          socket.connect();
+        }
       }
     });
 
